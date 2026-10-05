@@ -134,4 +134,4 @@ Les contributions de code sont les bienvenues, selon les termes de [CLA.md](CLA.
 
 ## À propos
 
-Je suis Kayhalan, développeur full-stack en France, et c'est moi qui ai écrit ceci. Le portage macOS, les textes anglais et les fichiers autour du code ont été préparés avec l'aide de Claude, et je les ai relus avant publication.
+Je suis Kayhalan, développeur full-stack en France, et c'est moi qui ai écrit ceci. Le portage macOS, les textes anglais et les fichiers autour du code ont été préparés avec l'aide de Claude.

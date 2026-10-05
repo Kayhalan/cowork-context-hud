@@ -134,4 +134,4 @@ Code contributions are welcome, under the terms of [CLA.md](CLA.md), summed up i
 
 ## About
 
-I'm Kayhalan, a full-stack developer based in France, and I wrote this. The macOS port, the English texts and the files around the code were prepared with Claude's help, and I went through them before publishing.
+I'm Kayhalan, a full-stack developer based in France, and I wrote this. The macOS port, the English texts and the files around the code were prepared with Claude's help.
