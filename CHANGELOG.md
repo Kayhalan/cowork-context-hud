@@ -1,0 +1,13 @@
+# Changelog
+
+## 0.1.0 (not released yet)
+
+First public version.
+
+- Floating window that shows the context usage of Cowork conversations, per conversation and per model, read from Claude Desktop's local cache (read-only, no network code).
+- Red mark at the auto-compaction threshold observed on your machine, and an alert (flashing border and a beep) at a chosen share of it.
+- Quota gauges for the 5 hour session and the week.
+- Table mode (`--once`) and diagnostics mode (`--debug`).
+- English interface by default, French as an option (menu or `--lang`).
+- Options `--data-dir`, `--framed` and `--version`.
+- Windows: tested. macOS: experimental, not tested, see TESTS_MACOS.md.

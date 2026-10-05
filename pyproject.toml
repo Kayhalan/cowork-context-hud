@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cowork-context-hud"
+version = "0.1.0"
+description = "Floating HUD that shows how full your Claude Cowork conversation context is, so you see compaction coming."
+readme = "README.md"
+requires-python = ">=3.8"
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Kayhalan" }]
+keywords = [
+    "claude", "claude-cowork", "claude-desktop", "context-window", "hud",
+    "token-counter", "compaction", "windows", "macos", "tkinter", "productivity",
+]
+
+[project.urls]
+Homepage = "https://github.com/Kayhalan/cowork-context-hud"
+Issues = "https://github.com/Kayhalan/cowork-context-hud/issues"
+
+[tool.setuptools]
+py-modules = ["context_hud"]

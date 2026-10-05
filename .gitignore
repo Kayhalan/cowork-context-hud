@@ -1,0 +1,29 @@
+# Files the HUD writes next to the script
+context_hud.lock
+context_hud_state.json
+context_hud_state.tmp
+context_hud.log
+
+# Python
+__pycache__/
+*.pyc
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+
+# Temporary folders and raw captures (only the cleaned images go in assets/)
+tmp/
+temp/
+captures/
+assets/raw/
+
+# System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
