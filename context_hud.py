@@ -69,6 +69,9 @@ MODEL_WINDOWS = (
     ("opus-4-6", 1_000_000), ("sonnet-4-6", 1_000_000),
 )
 DEFAULT_WINDOW = 200_000
+# Conversations opened from a project have no token counter in the cache, only their text:
+# the size is estimated from the number of characters (a rough average, French and code mixed).
+EST_CHARS_PER_TOKEN = 3.5
 
 # --------------------------------------------------------------------------
 # Interface text: English by default, French as an option (--lang fr or the HUD menu)
@@ -130,6 +133,7 @@ STRINGS = {
         "h_all_hidden": "All conversations are hidden",
         "h_all_hidden2": "Right click > Choose conversations...",
         "f_stale": "outdated: reopen it to refresh",
+        "f_estimate": "estimate from the text, system prompt not counted",
         "h_noturn": "no turn measured",
         "f_pinned": "● pinned", "f_auto": "AUTO", "f_running": "running",
         "f_data": "data: {age}",
@@ -192,6 +196,7 @@ STRINGS = {
         "h_all_hidden": "Toutes les conversations sont masquées",
         "h_all_hidden2": "Clic droit > Choisir les conversations...",
         "f_stale": "périmée : rouvrez-la pour actualiser",
+        "f_estimate": "estimation d'après le texte, prompt système non compté",
         "h_noturn": "aucun tour mesuré",
         "f_pinned": "● épinglée", "f_auto": "AUTO", "f_running": "en cours",
         "f_data": "données : {age}",
@@ -802,14 +807,15 @@ def _add_session(sessions, sid, entry):
         entry = dict(old, running=old["running"] or entry["running"],
                      activity=max(old["activity"], entry["activity"]),
                      archived=old["archived"] or entry["archived"],
-                     status=entry["status"] if entry["running"] else old["status"])
+                     status=entry["status"] if entry["running"] else old["status"],
+                     chat=old.get("chat") or entry.get("chat"))
     sessions[sid] = entry
 
 
 def summarize_client_state(o):
     """Cowork sessions known to the interface. Two lists carry them: "cowork-remote-sessions", and the
     claude.ai conversation list (the only one that has conversations opened from a project)."""
-    sessions, at = {}, 0.0
+    sessions, transcripts, at = {}, {}, 0.0
     for q in ((o.get("clientState") or {}).get("queries")) or []:
         if not isinstance(q, dict):
             continue
@@ -833,6 +839,11 @@ def summarize_client_state(o):
                     "status": str(s.get("liveStatus") or s.get("rawSessionStatus") or ""),
                 })
             at = max(at, stamp)
+        elif isinstance(key, list) and len(key) > 2 and key[0] == "hub_transcript":
+            ident = key[2].get("uuid") if isinstance(key[2], dict) else None
+            chars = _int(data.get("chars")) if isinstance(data, dict) else 0
+            if ident and chars:       # text of a conversation opened from a project
+                transcripts[str(ident)] = {"chars": chars, "at": stamp}
         else:
             chats = []
             _workspace_chats(data, chats)
@@ -846,12 +857,13 @@ def summarize_client_state(o):
                     "running": live == "running",
                     "archived": bool(c.get("is_archived")),
                     "status": live,
+                    "chat": str(c["uuid"]),
                 })
             if chats:
                 at = max(at, stamp)
-    if not sessions:
+    if not sessions and not transcripts:
         return None
-    return {"kind": "sessions", "at": at, "sessions": sessions}
+    return {"kind": "sessions", "at": at, "sessions": sessions, "transcripts": transcripts}
 
 
 def summarize(obj):
@@ -940,6 +952,7 @@ class Engine:
             if p not in live:
                 del self.cache[p]
         convs, sessions, sessions_at, rate = {}, {}, 0.0, None
+        transcripts = {}
         for p in files:
             s = self.read(p)
             if not s:
@@ -952,8 +965,12 @@ class Engine:
                     self.learned["windows"][m] = w
                 if s["rate"] and (rate is None or s["rate"][1] > rate[1]):
                     rate = s["rate"]
-            elif s["kind"] == "sessions" and s["at"] >= sessions_at:
-                sessions, sessions_at = s["sessions"], s["at"]
+            elif s["kind"] == "sessions":
+                if s["at"] >= sessions_at:
+                    sessions, sessions_at = s["sessions"], s["at"]
+                for ident, t in s.get("transcripts", {}).items():
+                    if ident not in transcripts or t["at"] >= transcripts[ident]["at"]:
+                        transcripts[ident] = t
 
         # observed auto-compaction threshold, per model (lowest automatic trigger)
         learned_compact = self.learned["compact"]
@@ -984,6 +1001,10 @@ class Engine:
                 continue
             model = (meta and meta["model"]) or (conv and conv["model"]) or ""
             tokens = conv["tokens"] if conv else None
+            est_at = 0.0
+            if not tokens and meta and meta.get("chat") in transcripts:
+                t = transcripts[meta["chat"]]
+                tokens, est_at = int(t["chars"] / EST_CHARS_PER_TOKEN), t["at"]
             window = self.window_for(model) if model else DEFAULT_WINDOW
             if tokens and tokens > window:
                 window = max(window, 1_000_000 if tokens <= 1_000_000 else tokens)
@@ -1007,7 +1028,9 @@ class Engine:
                 "status": meta["status"] if meta else "",
                 "activity": activity,
                 "fetched": fetched,
-                "data_age": (now - conv["written"]) if conv and conv["written"] else None,
+                "data_age": ((now - conv["written"]) if conv and conv["written"]
+                             else (now - est_at) if est_at else None),
+                "estimated": bool(est_at),
                 "cached": conv is not None,
                 "source": conv["source"] if conv else "",
                 # the conversation moved on since the cache was written: the numbers are behind
@@ -1079,11 +1102,11 @@ def print_table(snap, debug_stats=None):
     for r in rows:
         mark = ">" if r is active else " "
         run = "*" if r["running"] else " "
-        if not r["cached"]:
+        if not r["cached"] and not r["estimated"]:
             print(f"{mark}{run}{'':>5} {'':>5} {tr('not_cached'):>16} {'':>8} "
                   f"{pretty_model(r['model']):<11} {'':>8}  {r['title'][:44]}")
             continue
-        tok = f"{fk(r['tokens'])} / {fk(r['window'])}"
+        tok = ("≈ " if r["estimated"] else "") + f"{fk(r['tokens'])} / {fk(r['window'])}"
         print(f"{mark}{run}{r['pct']:4.0f}% {r['limit_pct']:4.0f}% {tok:>16} {fk(r['compact_at']) if r['compact_at'] else '-':>8} "
               f"{pretty_model(r['model']):<11} {ago(r['data_age']):>8}  {r['title'][:44]}")
     if not rows:
@@ -1617,7 +1640,7 @@ class Hud:
         self.root.bell()
 
     def check_alert(self, row):
-        if not row or not row["tokens"]:
+        if not row or not row["tokens"] or row["estimated"]:
             return
         key, lp = row["id"], row["limit_pct"]
         if lp >= self.warn and self.armed.get(key, True):
@@ -1698,12 +1721,12 @@ class Hud:
         self.bar(pad, S(26), w - pad, S(36), row, color)
         # line 3: tokens + percentage
         if row["tokens"]:
-            left = f"{fk(row['tokens'])} / {fk(row['window'])}"
+            left = ("≈ " if row["estimated"] else "") + f"{fk(row['tokens'])} / {fk(row['window'])}"
             if row["compact_at"]:
                 rest = row["compact_at"] - row["tokens"]
                 left += "  ·  " + tr("h_compact", v=fk(row["compact_at"])) + (
                     tr("h_left", v=fk(rest)) if rest > 0 else tr("h_reached"))
-            pct_txt = ("~" if row["stale"] else "") + f"{row['pct']:.0f} %"
+            pct_txt = ("≈" if row["estimated"] else "~" if row["stale"] else "") + f"{row['pct']:.0f} %"
         else:
             left = tr("h_notcached") if not row["cached"] else tr("h_noturn")
             pct_txt = "-"
@@ -1717,6 +1740,8 @@ class Hud:
         if row["running"]:
             foot.append(tr("f_running"))
         foot.append(tr("f_data", age=ago(row["data_age"])))
+        if row["estimated"]:
+            foot.append(tr("f_estimate"))
         if row["stale"]:
             foot.append(tr("f_stale"))
         if row["last_model"] and norm_model(row["last_model"]) != norm_model(row["model"]):
@@ -1741,7 +1766,7 @@ class Hud:
                               fill=GREEN if r["running"] else TRACK, outline="")
                 bx0, bx1 = pad + S(12), pad + S(56)
                 self.bar(bx0, cy - S(3), bx1, cy + S(3), r, rc)
-                pct = ("~" if r["stale"] else "") + f"{r['pct']:.0f} %" if r["tokens"] else "-"
+                pct = ("≈" if r["estimated"] else "~" if r["stale"] else "") + f"{r['pct']:.0f} %" if r["tokens"] else "-"
                 c.create_text(bx1 + S(38), cy, anchor="e", fill=rc if r["tokens"] else DIM,
                               font=self.f_small, text=pct)
                 mt = pretty_model(r["model"])
