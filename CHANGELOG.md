@@ -11,5 +11,6 @@ First public version.
 - English interface by default, French as an option (menu or `--lang`).
 - Choose which conversations are shown: right-click a row (pin or hide) or use the *Choose conversations* menu. The choice is remembered.
 - A `~` before the percentage flags numbers older than the conversation's last activity (the cache is only rewritten when Claude Desktop reloads the conversation).
+- Conversations opened from a project (Claude.ai conversation list attached to a Cowork workspace session) are now listed too, and flagged as running.
 - Options `--data-dir`, `--framed` and `--version`.
 - Windows: tested. macOS: experimental, not tested, see TESTS_MACOS.md.

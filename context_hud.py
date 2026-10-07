@@ -41,6 +41,7 @@ import sys
 import threading
 import time
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 __version__ = "0.1.0"
@@ -773,31 +774,84 @@ def summarize_conversation(o):
     }
 
 
+def _iso(v):
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _workspace_chats(node, out, depth=0):
+    """Claude.ai conversations attached to a Cowork workspace session (project conversations)."""
+    if depth > 10:
+        return
+    if isinstance(node, dict):
+        if node.get("workspace_session_id") and node.get("uuid"):
+            out.append(node)
+            return
+        for v in node.values():
+            _workspace_chats(v, out, depth + 1)
+    elif isinstance(node, list):
+        for v in node:
+            _workspace_chats(v, out, depth + 1)
+
+
+def _add_session(sessions, sid, entry):
+    old = sessions.get(sid)
+    if old:                       # known from the other list: keep the most informative values
+        entry = dict(old, running=old["running"] or entry["running"],
+                     activity=max(old["activity"], entry["activity"]),
+                     archived=old["archived"] or entry["archived"],
+                     status=entry["status"] if entry["running"] else old["status"])
+    sessions[sid] = entry
+
+
 def summarize_client_state(o):
-    queries = ((o.get("clientState") or {}).get("queries")) or []
-    for q in queries:
-        key = q.get("queryKey") if isinstance(q, dict) else None
-        if not (isinstance(key, list) and key and key[0] == "cowork-remote-sessions"):
+    """Cowork sessions known to the interface. Two lists carry them: "cowork-remote-sessions", and the
+    claude.ai conversation list (the only one that has conversations opened from a project)."""
+    sessions, at = {}, 0.0
+    for q in ((o.get("clientState") or {}).get("queries")) or []:
+        if not isinstance(q, dict):
             continue
+        key = q.get("queryKey")
         state = q.get("state") or {}
         data = state.get("data")
-        if not isinstance(data, list):
-            continue
-        sessions = {}
-        for s in data:
-            if not isinstance(s, dict) or not s.get("sessionId"):
+        stamp = _num(state.get("dataUpdatedAt")) / 1000
+        if isinstance(key, list) and key and key[0] == "cowork-remote-sessions":
+            if not isinstance(data, list):
                 continue
-            sessions[str(s["sessionId"])] = {
-                "title": str(s.get("title") or ""),
-                "model": str(s.get("model") or ""),
-                "activity": _num(s.get("lastActivityAt")) / 1000,
-                "created": _num(s.get("createdAt")) / 1000,
-                "running": bool(s.get("isRunning")),
-                "archived": bool(s.get("isArchived")),
-                "status": str(s.get("liveStatus") or s.get("rawSessionStatus") or ""),
-            }
-        return {"kind": "sessions", "at": _num(state.get("dataUpdatedAt")) / 1000, "sessions": sessions}
-    return None
+            for s in data:
+                if not isinstance(s, dict) or not s.get("sessionId"):
+                    continue
+                _add_session(sessions, str(s["sessionId"]), {
+                    "title": str(s.get("title") or ""),
+                    "model": str(s.get("model") or ""),
+                    "activity": _num(s.get("lastActivityAt")) / 1000,
+                    "created": _num(s.get("createdAt")) / 1000,
+                    "running": bool(s.get("isRunning")),
+                    "archived": bool(s.get("isArchived")),
+                    "status": str(s.get("liveStatus") or s.get("rawSessionStatus") or ""),
+                })
+            at = max(at, stamp)
+        else:
+            chats = []
+            _workspace_chats(data, chats)
+            for c in chats:
+                live = str(c.get("live_status") or "")
+                _add_session(sessions, str(c["workspace_session_id"]), {
+                    "title": str(c.get("name") or ""),
+                    "model": str(c.get("model") or ""),
+                    "activity": _iso(c.get("updated_at")),
+                    "created": _iso(c.get("created_at")),
+                    "running": live == "running",
+                    "archived": bool(c.get("is_archived")),
+                    "status": live,
+                })
+            if chats:
+                at = max(at, stamp)
+    if not sessions:
+        return None
+    return {"kind": "sessions", "at": at, "sessions": sessions}
 
 
 def summarize(obj):
