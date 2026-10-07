@@ -95,6 +95,15 @@ STRINGS = {
                    "be saved and a second HUD will not be detected.",
         "m_auto": "Auto mode (active conversation)",
         "m_all": "Show all conversations",
+        "m_convs": "Choose conversations...",
+        "m_pin_this": "Pin this conversation",
+        "m_unpin": "Back to auto mode",
+        "m_hide_this": "Hide this conversation",
+        "m_hide_cur": "Hide the displayed conversation",
+        "m_nothing": "No conversation",
+        "d_title": "Conversations to show",
+        "d_hint": "Tick the conversations to show in the HUD.",
+        "d_all": "Show all", "d_none": "Hide all", "d_close": "Close",
         "m_size": "Size", "m_width": "Width", "m_opacity": "Opacity",
         "m_fine_ctrl": "Ctrl + wheel: fine adjustment",
         "m_fine_alt": "{alt} + wheel: fine adjustment",
@@ -117,6 +126,9 @@ STRINGS = {
         "h_left": " ({v} left)",
         "h_reached": " (reached)",
         "h_notcached": "not cached yet: open it once",
+        "h_all_hidden": "All conversations are hidden",
+        "h_all_hidden2": "Right click > Choose conversations...",
+        "f_stale": "outdated: reopen it to refresh",
         "h_noturn": "no turn measured",
         "f_pinned": "● pinned", "f_auto": "AUTO", "f_running": "running",
         "f_data": "data: {age}",
@@ -145,6 +157,15 @@ STRINGS = {
                    "réglages ne seront pas enregistrés et un second HUD ne sera pas détecté.",
         "m_auto": "Mode auto (conversation active)",
         "m_all": "Afficher toutes les conversations",
+        "m_convs": "Choisir les conversations...",
+        "m_pin_this": "Épingler cette conversation",
+        "m_unpin": "Retour au mode auto",
+        "m_hide_this": "Masquer cette conversation",
+        "m_hide_cur": "Masquer la conversation affichée",
+        "m_nothing": "Aucune conversation",
+        "d_title": "Conversations à afficher",
+        "d_hint": "Cochez les conversations à afficher dans le HUD.",
+        "d_all": "Tout afficher", "d_none": "Tout masquer", "d_close": "Fermer",
         "m_size": "Taille", "m_width": "Largeur", "m_opacity": "Opacité",
         "m_fine_ctrl": "Ctrl + molette : réglage fin",
         "m_fine_alt": "{alt} + molette : réglage fin",
@@ -167,6 +188,9 @@ STRINGS = {
         "h_left": " (reste {v})",
         "h_reached": " (atteint)",
         "h_notcached": "pas encore en cache : ouvrez-la une fois",
+        "h_all_hidden": "Toutes les conversations sont masquées",
+        "h_all_hidden2": "Clic droit > Choisir les conversations...",
+        "f_stale": "périmée : rouvrez-la pour actualiser",
         "h_noturn": "aucun tour mesuré",
         "f_pinned": "● épinglée", "f_auto": "AUTO", "f_running": "en cours",
         "f_data": "données : {age}",
@@ -932,11 +956,13 @@ class Engine:
                 "data_age": (now - conv["written"]) if conv and conv["written"] else None,
                 "cached": conv is not None,
                 "source": conv["source"] if conv else "",
+                # the conversation moved on since the cache was written: the numbers are behind
+                "stale": bool(conv and conv["written"] and meta and activity - conv["written"] > 120),
             })
         rows.sort(key=lambda r: (r["running"], max(r["activity"], r["fetched"])), reverse=True)
         quota = merge_quota(self.local_storage_quota() + quota_from_history(self.roots)
                             + quota_from_rate_event(rate), now)
-        return {"rows": rows[: self.args.limit], "quota": quota, "at": now,
+        return {"rows": rows[: self.args.limit], "all": rows, "quota": quota, "at": now,
                 "dirs": [str(d) for d in self.dirs], "nfiles": len(files)}
 
 
@@ -1052,6 +1078,11 @@ class Hud:
         self.snap = None
         self.lock = threading.Lock()
         self.pinned = state.get("pinned")
+        hidden = state.get("hidden")
+        self.hidden = {h for h in hidden if isinstance(h, str)} if isinstance(hidden, list) else set()
+        self.conv_vars = {}
+        self.conv_win = None
+        self.dyn_n = 0
         self.expanded = bool(state.get("expanded", False))
         self.warn = float(args.warn if args.warn is not None else state.get("warn", 80.0))
         self.sound = bool(state.get("sound", True))
@@ -1152,6 +1183,7 @@ class Hud:
         m.add_command(label=tr("m_auto"), command=self.set_auto)
         m.add_checkbutton(label=tr("m_all"), variable=self.v_expanded,
                           command=lambda: self.set_expanded(self.v_expanded.get()))
+        m.add_command(label=tr("m_convs"), command=self.open_conv_window)
         m.add_separator()
         sz = tk.Menu(m, tearoff=0)
         for z in self.ZOOMS:
@@ -1195,19 +1227,117 @@ class Hud:
         if self.menu_stale:               # the language changed: rebuild with the new labels
             old = self.menu
             self.build_menu()
+            self.dyn_n = 0
             old.destroy()
             self.menu_stale = False
+        self.dyn_top(next((sid for y0, y1, sid in self.rows_hit if y0 <= e.y < y1), None))
         try:
             self.menu.tk_popup(e.x_root, e.y_root)
         finally:
             self.menu.grab_release()
+
+    def dyn_top(self, hit):
+        """Actions on one conversation, put at the top of the main menu (none when there is no target)."""
+        m = self.menu
+        if self.dyn_n:
+            m.delete(0, self.dyn_n - 1)
+            self.dyn_n = 0
+        with self.lock:
+            snap = self.snap
+        row, _ = self.current(self.visible(snap))
+        target = hit or (row["id"] if row else None)
+        if not target:
+            return
+        items = []
+        if hit:
+            if self.pinned == hit:
+                items.append((tr("m_unpin"), self.set_auto))
+            else:
+                items.append((tr("m_pin_this"), lambda: self.pin(hit)))
+        items.append((tr("m_hide_this") if hit else tr("m_hide_cur"), lambda: self.hide(target)))
+        for i, (label, cmd) in enumerate(items):
+            m.insert_command(i, label=label, command=cmd)
+        m.insert_separator(len(items))
+        self.dyn_n = len(items) + 1
+
+    # -- "Choose conversations" window ------------------------------------
+    def open_conv_window(self):
+        tk = self.tk
+        if self.conv_win is not None:
+            try:
+                self.conv_win.lift()
+                return
+            except tk.TclError:
+                self.conv_win = None
+        with self.lock:
+            snap = self.snap
+        allrows = snap["all"] if snap else []
+        win = self.conv_win = tk.Toplevel(self.root)
+        win.title(tr("d_title"))
+        win.configure(bg=BG)
+        win.attributes("-topmost", True)
+        win.geometry(f"+{max(0, self.pos[0] - 40)}+{self.pos[1] + 40}")
+
+        def closed():
+            self.conv_win = None
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", closed)
+        tk.Label(win, text=tr("d_hint"), bg=BG, fg=DIM, anchor="w").pack(fill="x", padx=10, pady=(8, 4))
+        body = tk.Frame(win, bg=BG)
+        body.pack(fill="both", expand=True, padx=6)
+        cv = tk.Canvas(body, bg=BG, highlightthickness=0, width=380, height=min(380, 26 * max(len(allrows), 1) + 6))
+        sb = tk.Scrollbar(body, orient="vertical", command=cv.yview)
+        inner = tk.Frame(cv, bg=BG)
+        inner.bind("<Configure>", lambda ev: cv.configure(scrollregion=cv.bbox("all")))
+        cv.create_window((0, 0), window=inner, anchor="nw")
+        cv.configure(yscrollcommand=sb.set)
+        cv.pack(side="left", fill="both", expand=True)
+        if len(allrows) > 14:
+            sb.pack(side="right", fill="y")
+        cv.bind("<MouseWheel>", lambda ev: cv.yview_scroll(-1 if ev.delta > 0 else 1, "units"))
+        self.conv_vars = {}
+        if not allrows:
+            tk.Label(inner, text=tr("m_nothing"), bg=BG, fg=DIM).pack(anchor="w", padx=6, pady=6)
+        for r in allrows:
+            v = self.conv_vars[r["id"]] = tk.BooleanVar(value=r["id"] not in self.hidden)
+            cb = tk.Checkbutton(inner, text=self.clip(r["title"], 52), variable=v, anchor="w",
+                                bg=BG, fg=FG, activebackground=BG, activeforeground=FG,
+                                selectcolor=TRACK, highlightthickness=0,
+                                command=lambda sid=r["id"]: self.toggle_conv(sid))
+            cb.pack(fill="x", anchor="w")
+            cb.bind("<MouseWheel>", lambda ev: cv.yview_scroll(-1 if ev.delta > 0 else 1, "units"))
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(fill="x", padx=10, pady=8)
+        tk.Button(bar, text=tr("d_all"), command=self.show_all_sync).pack(side="left")
+        tk.Button(bar, text=tr("d_none"), command=self.hide_all_sync).pack(side="left", padx=6)
+        tk.Button(bar, text=tr("d_close"), command=closed).pack(side="right")
+
+    def show_all_sync(self):
+        self.show_all()
+        for v in self.conv_vars.values():
+            v.set(True)
+
+    def hide_all_sync(self):
+        with self.lock:
+            snap = self.snap
+        for r in (snap["all"] if snap else []):
+            self.hidden.add(r["id"])
+        self.pinned = None
+        self.after_hidden_change()
+        for v in self.conv_vars.values():
+            v.set(False)
+
+    @staticmethod
+    def clip(text, n):
+        text = " ".join(str(text).split())
+        return text if len(text) <= n else text[: n - 1] + "…"
 
     # -- geometry ---------------------------------------------------------
     def S(self, v):
         return int(round(v * self.s * self.zoom))
 
     def size(self):
-        n = len(self.snap["rows"]) if (self.expanded and self.snap) else 0
+        n = len(self.visible(self.snap)) if (self.expanded and self.snap) else 0
         h = HEAD0 + (n * ROW0 + 10 + (16 if self.snap and self.snap["quota"] else 0) if n else 0)
         return self.S(self.width), self.S(h)
 
@@ -1260,7 +1390,7 @@ class Hud:
 
     # -- actions ----------------------------------------------------------
     def persist(self):
-        self.state.update(pinned=self.pinned, expanded=self.expanded, warn=self.warn,
+        self.state.update(pinned=self.pinned, hidden=sorted(self.hidden), expanded=self.expanded, warn=self.warn,
                           sound=self.sound, topmost=self.topmost, zoom=self.zoom,
                           alpha=self.alpha, width=self.width)
         if not self.args.framed:
@@ -1272,6 +1402,41 @@ class Hud:
 
     def set_auto(self):
         self.pinned = None
+        self.persist()
+        self.render()
+
+    def visible(self, snap):
+        """Conversations that are not hidden, in display order, capped by --limit."""
+        if not snap:
+            return []
+        return [r for r in snap["all"] if r["id"] not in self.hidden][: self.args.limit]
+
+    def pin(self, sid):
+        self.pinned = sid
+        self.persist()
+        self.render()
+
+    def hide(self, sid):
+        self.hidden.add(sid)
+        if self.pinned == sid:
+            self.pinned = None
+        self.after_hidden_change()
+
+    def toggle_conv(self, sid):
+        if sid in self.hidden:
+            self.hidden.discard(sid)
+        else:
+            self.hidden.add(sid)
+            if self.pinned == sid:
+                self.pinned = None
+        self.after_hidden_change()
+
+    def show_all(self):
+        self.hidden.clear()
+        self.after_hidden_change()
+
+    def after_hidden_change(self):
+        self.place()
         self.persist()
         self.render()
 
@@ -1453,13 +1618,17 @@ class Hud:
             c.create_text(pad, S(HEAD0) / 2, anchor="w", fill=DIM, font=self.f_small,
                           text=err or tr("h_loading"))
             return
-        rows = snap["rows"]
+        rows = self.visible(snap)
         row, pinned = self.current(rows)
         self.check_alert(row)
         if row is None:
-            c.create_text(pad, S(30), anchor="w", fill=FG, font=self.f_title, text=tr("h_none"))
-            c.create_text(pad, S(52), anchor="w", fill=DIM, font=self.f_small,
-                          text=err or tr("h_open"))
+            if snap["all"]:               # there are conversations, all hidden
+                head, hint = tr("h_all_hidden"), tr("h_all_hidden2")
+            else:
+                head, hint = tr("h_none"), tr("h_open")
+            c.create_text(pad, S(30), anchor="w", fill=FG, font=self.f_title, text=head)
+            c.create_text(pad, S(52), anchor="w", fill=DIM, font=self.f_small, text=err or hint)
+            self.rows_hit = []
             return
 
         color = level_color(row["limit_pct"], self.warn)
@@ -1480,7 +1649,7 @@ class Hud:
                 rest = row["compact_at"] - row["tokens"]
                 left += "  ·  " + tr("h_compact", v=fk(row["compact_at"])) + (
                     tr("h_left", v=fk(rest)) if rest > 0 else tr("h_reached"))
-            pct_txt = f"{row['pct']:.0f} %"
+            pct_txt = ("~" if row["stale"] else "") + f"{row['pct']:.0f} %"
         else:
             left = tr("h_notcached") if not row["cached"] else tr("h_noturn")
             pct_txt = "-"
@@ -1494,6 +1663,8 @@ class Hud:
         if row["running"]:
             foot.append(tr("f_running"))
         foot.append(tr("f_data", age=ago(row["data_age"])))
+        if row["stale"]:
+            foot.append(tr("f_stale"))
         if row["last_model"] and norm_model(row["last_model"]) != norm_model(row["model"]):
             foot.append(tr("f_lastturn", m=pretty_model(row["last_model"])))
         if err:
@@ -1516,7 +1687,7 @@ class Hud:
                               fill=GREEN if r["running"] else TRACK, outline="")
                 bx0, bx1 = pad + S(12), pad + S(56)
                 self.bar(bx0, cy - S(3), bx1, cy + S(3), r, rc)
-                pct = f"{r['pct']:.0f} %" if r["tokens"] else "-"
+                pct = ("~" if r["stale"] else "") + f"{r['pct']:.0f} %" if r["tokens"] else "-"
                 c.create_text(bx1 + S(38), cy, anchor="e", fill=rc if r["tokens"] else DIM,
                               font=self.f_small, text=pct)
                 mt = pretty_model(r["model"])

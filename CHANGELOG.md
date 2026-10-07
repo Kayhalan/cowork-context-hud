@@ -9,5 +9,7 @@ First public version.
 - Quota gauges for the 5 hour session and the week.
 - Table mode (`--once`) and diagnostics mode (`--debug`).
 - English interface by default, French as an option (menu or `--lang`).
+- Choose which conversations are shown: right-click a row (pin or hide) or use the *Choose conversations* menu. The choice is remembered.
+- A `~` before the percentage flags numbers older than the conversation's last activity (the cache is only rewritten when Claude Desktop reloads the conversation).
 - Options `--data-dir`, `--framed` and `--version`.
 - Windows: tested. macOS: experimental, not tested, see TESTS_MACOS.md.

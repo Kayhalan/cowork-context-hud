@@ -56,11 +56,12 @@ Linux isn't supported. If you want to try it anyway, `--data-dir` lets you point
 | Size | Ctrl + wheel | Ctrl + wheel |
 | Opacity | Shift + wheel | Shift + wheel |
 | Width | Alt + wheel | Option + wheel |
+| Hide or pin a conversation (list shown) | Right-click on its row | Right-click or Ctrl + click on its row |
 | Menu | Right-click | Right-click or Ctrl + click |
 
-The menu also has the alert level (60, 70, 80 or 90 % of the compaction threshold), the alert sound, always on top, the language (English or French) and a reset for the look. Settings are remembered.
+The menu has a *Choose conversations...* list to show or hide each conversation (hidden ones are skipped by the auto mode and the list). The menu also has the alert level (60, 70, 80 or 90 % of the compaction threshold), the alert sound, always on top, the language (English or French) and a reset for the look. Settings are remembered.
 
-By default the HUD follows the conversation that is running, or else the one used most recently. Pin one to keep it on screen.
+By default the HUD follows the conversation that is running, or else the one used most recently. Pin one to keep it on screen. A `~` before the percentage means the cache is older than the last activity of the conversation: reopen it in Claude Desktop to refresh the numbers.
 
 Options for the command line:
 

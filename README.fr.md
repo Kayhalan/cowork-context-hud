@@ -56,11 +56,12 @@ Linux n'est pas pris en charge. Si vous voulez essayer quand même, `--data-dir`
 | Taille | Ctrl + molette | Ctrl + molette |
 | Opacité | Maj + molette | Maj + molette |
 | Largeur | Alt + molette | Option + molette |
+| Masquer ou épingler une conversation (liste affichée) | Clic droit sur sa ligne | Clic droit ou Ctrl + clic sur sa ligne |
 | Menu | Clic droit | Clic droit ou Ctrl + clic |
 
-Le menu propose aussi le niveau d'alerte (60, 70, 80 ou 90 % du seuil de compactage), le son d'alerte, le premier plan, la langue (anglais ou français) et une remise à zéro de l'apparence. Les réglages sont mémorisés.
+Le menu contient une liste *Choisir les conversations...* pour afficher ou masquer chacune d'elles (les conversations masquées sont ignorées par le mode auto et par la liste). Le menu propose aussi le niveau d'alerte (60, 70, 80 ou 90 % du seuil de compactage), le son d'alerte, le premier plan, la langue (anglais ou français) et une remise à zéro de l'apparence. Les réglages sont mémorisés.
 
-Par défaut, le HUD suit la conversation en cours d'exécution, sinon la plus récente. Épinglez-en une pour la garder à l'écran.
+Par défaut, le HUD suit la conversation en cours d'exécution, sinon la plus récente. Épinglez-en une pour la garder à l'écran. Un `~` devant le pourcentage signifie que le cache est plus ancien que la dernière activité de la conversation : rouvrez-la dans Claude Desktop pour actualiser les chiffres.
 
 Options de la ligne de commande :
 
