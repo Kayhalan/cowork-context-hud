@@ -115,6 +115,8 @@ STRINGS = {
         "m_warn": "Alert threshold",
         "m_warn_item": "{v} % of the compaction threshold",
         "m_sound": "Alert sound",
+        "m_cthr": "Compaction threshold", "m_cthr_auto": "Auto (observed)", "m_cthr_item": "{v} tokens",
+        "t_compacted": "Compacted: {t}", "t_warn": "{t}: {p} %", "t_crit": "COMPACTION IMMINENT {t}: {p} %",
         "m_top": "Always on top",
         "m_lang": "Language",
         "m_reset": "Reset appearance",
@@ -133,7 +135,7 @@ STRINGS = {
         "h_all_hidden": "All conversations are hidden",
         "h_all_hidden2": "Right click > Choose conversations...",
         "f_stale": "outdated: reopen it to refresh",
-        "f_estimate": "estimate from the text, system prompt not counted",
+        "f_estimate": "estimate calibrated on your real compactions (±35 %)",
         "h_noturn": "no turn measured",
         "f_pinned": "● pinned", "f_auto": "AUTO", "f_running": "running",
         "f_data": "data: {age}",
@@ -178,6 +180,8 @@ STRINGS = {
         "m_warn": "Seuil d'alerte",
         "m_warn_item": "{v} % du seuil de compactage",
         "m_sound": "Son d'alerte",
+        "m_cthr": "Seuil de compactage", "m_cthr_auto": "Auto (observe)", "m_cthr_item": "{v} tokens",
+        "t_compacted": "Compacte : {t}", "t_warn": "{t} : {p} %", "t_crit": "COMPACTAGE IMMINENT {t} : {p} %",
         "m_top": "Toujours au premier plan",
         "m_lang": "Langue",
         "m_reset": "Réinitialiser l'apparence",
@@ -196,7 +200,7 @@ STRINGS = {
         "h_all_hidden": "Toutes les conversations sont masquées",
         "h_all_hidden2": "Clic droit > Choisir les conversations...",
         "f_stale": "périmée : rouvrez-la pour actualiser",
-        "f_estimate": "estimation d'après le texte, prompt système non compté",
+        "f_estimate": "estimation calibrée sur vos vrais compactages (±35 %)",
         "h_noturn": "aucun tour mesuré",
         "f_pinned": "● épinglée", "f_auto": "AUTO", "f_running": "en cours",
         "f_data": "données : {age}",
@@ -843,7 +847,10 @@ def summarize_client_state(o):
             ident = key[2].get("uuid") if isinstance(key[2], dict) else None
             chars = _int(data.get("chars")) if isinstance(data, dict) else 0
             if ident and chars:       # text of a conversation opened from a project
-                transcripts[str(ident)] = {"chars": chars, "at": stamp}
+                hw = data.get("historyWindow")
+                transcripts[str(ident)] = {"chars": chars, "at": stamp,
+                                           "session": str(data.get("proxiedCoworkSessionId") or ""),
+                                           "windowed": isinstance(hw, dict) and hw.get("mode") == "windowed"}
         else:
             chats = []
             _workspace_chats(data, chats)
@@ -871,9 +878,35 @@ def summarize(obj):
         return None
     if str(obj.get("product")) == "cowork" and isinstance(obj.get("tree"), dict):
         return summarize_conversation(obj)
+    if str(obj.get("product")) == "hub" and isinstance(obj.get("tree"), dict):
+        return summarize_hub(obj)
     if isinstance(obj.get("clientState"), dict):
         return summarize_client_state(obj)
     return None
+
+
+COWORK_COMPACT_RATIO = 0.38   # Cowork compacts near 38 % of the window (382 k of 1 M observed on Sonnet 5.5)
+HUB_BASE_TOKENS = 25_000      # system prompt + tools + summary that a conversation carries from the start
+HUB_K_DEFAULT = 2.0           # tokens per character of the cached transcript (calibrated on real compactions)
+
+
+def summarize_hub(o):
+    """Conversation opened from a project: no token counter, only the transcript the interface shows.
+    The size of what was added since the last compaction divider is the signal."""
+    tree = o.get("tree") or {}
+    msgs = [m for m in (tree.get("messages") or []) if isinstance(m, dict)]
+    sizes = [len(json.dumps(m, ensure_ascii=False, default=str)) for m in msgs]
+    divs = [i for i, m in enumerate(msgs) if m.get("compactionDivider")]
+    start = divs[-1] + 1 if divs else 0
+    segments = [sum(sizes[a + 1:b + 1]) for a, b in zip(divs, divs[1:])]
+    hw = tree.get("historyWindow")
+    return {
+        "kind": "hub", "chat": str(o.get("conversationUuid") or ""),
+        "written": _num(o.get("writtenAt")) / 1000, "fetched": _num(o.get("fetchedAt")) / 1000,
+        "updated": _num(o.get("conversationUpdatedAt")) / 1000,
+        "tail": sum(sizes[start:]), "n_div": len(divs), "segments": segments,
+        "windowed": isinstance(hw, dict) and hw.get("mode") == "windowed",
+    }
 
 
 class Engine:
@@ -887,6 +920,24 @@ class Engine:
         self.roots = []
         self.ls_sig = None
         self.ls_quota = []
+
+    @staticmethod
+    def merge_duplicates(rows):
+        """One line per conversation: same title and model seen under two ids keeps the freshest one."""
+        best = {}
+        for r in rows:
+            k = (r["env"], re.sub(r"\W+", "", r["title"].lower()), norm_model(r["model"]))
+            old = best.get(k)
+            if old is None:
+                best[k] = r
+                continue
+            fresh = lambda x: max(x["activity"], x["fetched"])
+            keep, drop = (r, old) if fresh(r) > fresh(old) else (old, r)
+            if (drop["tokens"] or 0) > (keep["tokens"] or 0):
+                keep["tokens"], keep["pct"], keep["limit_pct"] = drop["tokens"], drop["pct"], drop["limit_pct"]
+            keep["running"] = keep["running"] or drop["running"]
+            best[k] = keep
+        return list(best.values())
 
     def files(self):
         now = time.time()
@@ -952,7 +1003,7 @@ class Engine:
             if p not in live:
                 del self.cache[p]
         convs, sessions, sessions_at, rate = {}, {}, 0.0, None
-        transcripts = {}
+        transcripts, hubs = {}, {}
         for p in files:
             s = self.read(p)
             if not s:
@@ -965,6 +1016,10 @@ class Engine:
                     self.learned["windows"][m] = w
                 if s["rate"] and (rate is None or s["rate"][1] > rate[1]):
                     rate = s["rate"]
+            elif s["kind"] == "hub":
+                old = hubs.get(s["chat"])
+                if old is None or s["written"] >= old["written"]:
+                    hubs[s["chat"]] = s
             elif s["kind"] == "sessions":
                 if s["at"] >= sessions_at:
                     sessions, sessions_at = s["sessions"], s["at"]
@@ -988,6 +1043,23 @@ class Engine:
             if c["tokens"] and c["source"] == "tour" and m:
                 peak[m] = max(peak.get(m, 0), c["tokens"])
 
+        # calibration: a segment between two compaction dividers ended at the compaction threshold
+        calib = self.learned.setdefault("calib", {})
+        ref = learned_compact.get("claude-sonnet-5-5") or (min(learned_compact.values()) if learned_compact else 0)
+        if ref:
+            for h in hubs.values():
+                for i, seg in enumerate(h["segments"]):
+                    if seg > 20_000:
+                        calib.setdefault(f"{h['chat']}:{i}", round((ref - HUB_BASE_TOKENS) / seg, 3))
+        while len(calib) > 40:
+            calib.pop(next(iter(calib)))
+        ks = sorted(calib.values())
+        k_est = (ks[(len(ks) - 1) // 2] + ks[len(ks) // 2]) / 2 if ks else HUB_K_DEFAULT
+        by_session = {}
+        for chat, t in transcripts.items():
+            if t.get("session"):
+                by_session[t["session"]] = chat
+
         cutoff = now - self.args.days * 86400
         rows = []
         for sid in set(sessions) | set(convs):
@@ -1001,15 +1073,25 @@ class Engine:
                 continue
             model = (meta and meta["model"]) or (conv and conv["model"]) or ""
             tokens = conv["tokens"] if conv else None
-            est_at = 0.0
-            if not tokens and meta and meta.get("chat") in transcripts:
-                t = transcripts[meta["chat"]]
-                tokens, est_at = int(t["chars"] / EST_CHARS_PER_TOKEN), t["at"]
+            est_at, n_div, written = 0.0, 0, conv["written"] if conv else 0
+            hub = hubs.get((meta and meta.get("chat")) or by_session.get(sid))
+            if hub:
+                est = int(HUB_BASE_TOKENS + hub["tail"] * k_est)
+                n_div = hub["n_div"]
+                if not tokens or hub["written"] > written:
+                    # no compaction divider: the context only grows, an older exact figure stays a floor
+                    tokens = est if hub["n_div"] else max(est, tokens or 0)
+                    est_at = hub["written"]
+                    written = hub["written"]
+                fetched = max(fetched, hub["fetched"])
             window = self.window_for(model) if model else DEFAULT_WINDOW
             if tokens and tokens > window:
                 window = max(window, 1_000_000 if tokens <= 1_000_000 else tokens)
             m = norm_model(model)
             compact_at = learned_compact.get(m)
+            if not compact_at:        # never seen for this model: borrow a model with the same window, else the ratio
+                same = [t for k, t in learned_compact.items() if self.window_for(k) == window]
+                compact_at = int(min(same)) if same else int(window * COWORK_COMPACT_RATIO)
             if compact_at and peak.get(m, 0) > compact_at * 1.02:
                 compact_at = None
             compact_at = self.args.compact_at or compact_at
@@ -1028,15 +1110,17 @@ class Engine:
                 "status": meta["status"] if meta else "",
                 "activity": activity,
                 "fetched": fetched,
-                "data_age": ((now - conv["written"]) if conv and conv["written"]
-                             else (now - est_at) if est_at else None),
+                "data_age": (now - written) if written else None,
+                "n_div": n_div,
                 "estimated": bool(est_at),
-                "cached": conv is not None,
+                "cached": conv is not None or bool(hub),
+                "env": "cowork",
                 "source": conv["source"] if conv else "",
                 # the conversation moved on since the cache was written: the numbers are behind
-                "stale": bool(conv and conv["written"] and meta and activity - conv["written"] > 120),
+                "stale": bool(written and meta and activity - written > 120),
             })
-        rows.sort(key=lambda r: (r["running"], max(r["activity"], r["fetched"])), reverse=True)
+        rows = self.merge_duplicates(rows)
+        rows.sort(key=lambda r: (max(r["activity"], r["fetched"]), r["running"]), reverse=True)
         quota = merge_quota(self.local_storage_quota() + quota_from_history(self.roots)
                             + quota_from_rate_event(rate), now)
         return {"rows": rows[: self.args.limit], "all": rows, "quota": quota, "at": now,
@@ -1053,11 +1137,10 @@ def quota_text(quota, now):
 
 
 def pick_active(rows):
+    """The conversation you are in: the one with the most recent sign of life (message, opening, run)."""
     if not rows:
         return None
-    running = [r for r in rows if r["running"]]
-    pool = running or rows
-    return max(pool, key=lambda r: max(r["activity"], r["fetched"]))
+    return max(rows, key=lambda r: (max(r["activity"], r["fetched"]), r["running"]))
 
 
 # --------------------------------------------------------------------------
@@ -1070,13 +1153,15 @@ def load_state():
         if isinstance(st, dict) and isinstance(st.get("learned", {}), dict):
             st.setdefault("learned", {})
             st["learned"].setdefault("windows", {})
+            st["learned"].pop("events", None)         # came from Claude Code sessions, not from Cowork
+            st["learned"].setdefault("calib", {})
             comp = st["learned"].setdefault("compact", {})
             for k in [k for k in comp if not str(k).startswith("claude-")]:
                 del comp[k]        # old format (per window size)
             return st
     except (OSError, ValueError):
         pass
-    return {"learned": {"windows": {}, "compact": {}}}
+    return {"learned": {"windows": {}, "compact": {}, "calib": {}}}
 
 
 def save_state(st):
@@ -1154,7 +1239,7 @@ class Hud:
         self.engine = Engine(args, state["learned"])
         self.snap = None
         self.lock = threading.Lock()
-        self.pinned = state.get("pinned")
+        self.pinned = None          # auto at every launch: the HUD follows the conversation you are in
         hidden = state.get("hidden")
         self.hidden = {h for h in hidden if isinstance(h, str)} if isinstance(hidden, list) else set()
         self.conv_vars = {}
@@ -1163,6 +1248,10 @@ class Hud:
         self.expanded = bool(state.get("expanded", False))
         self.warn = float(args.warn if args.warn is not None else state.get("warn", 80.0))
         self.sound = bool(state.get("sound", True))
+        if not args.compact_at:
+            args.compact_at = int(state.get("compact_at") or 0)
+        self.last_tok = {}
+        self.last_div = {}
         self.topmost = bool(state.get("topmost", True))
         self.zoom = self._clamp(args.zoom or state.get("zoom", 1.0), 0.6, 2.5)
         self.alpha = self._clamp(args.alpha or state.get("alpha", 0.94), 0.3, 1.0)
@@ -1289,6 +1378,13 @@ class Hud:
             wa.add_radiobutton(label=tr("m_warn_item", v=v), value=v, variable=self.v_warn,
                                command=self.set_warn)
         m.add_cascade(label=tr("m_warn"), menu=wa)
+        ct = tk.Menu(m, tearoff=0)
+        self.v_cthr = tk.IntVar(value=int(self.args.compact_at or 0))
+        ct.add_radiobutton(label=tr("m_cthr_auto"), value=0, variable=self.v_cthr, command=self.set_cthr)
+        for v in self.CTHRS:
+            ct.add_radiobutton(label=tr("m_cthr_item", v=fk(v)), value=v, variable=self.v_cthr,
+                               command=self.set_cthr)
+        m.add_cascade(label=tr("m_cthr"), menu=ct)
         m.add_checkbutton(label=tr("m_sound"), variable=self.v_sound, command=self.set_sound)
         m.add_checkbutton(label=tr("m_top"), variable=self.v_top, command=self.set_top)
         lm = tk.Menu(m, tearoff=0)
@@ -1469,7 +1565,7 @@ class Hud:
     def persist(self):
         self.state.update(pinned=self.pinned, hidden=sorted(self.hidden), expanded=self.expanded, warn=self.warn,
                           sound=self.sound, topmost=self.topmost, zoom=self.zoom,
-                          alpha=self.alpha, width=self.width)
+                          alpha=self.alpha, width=self.width, compact_at=self.args.compact_at)
         if not self.args.framed:
             self.state["pos"] = list(self.pos)
         save_state(self.state)
@@ -1563,6 +1659,13 @@ class Hud:
         self.persist()
         self.render()
 
+    CTHRS = (150_000, 200_000, 300_000, 500_000, 700_000, 800_000, 900_000)
+
+    def set_cthr(self):
+        self.args.compact_at = int(self.v_cthr.get())
+        self.armed.clear()
+        self.persist()
+
     def set_warn(self):
         self.warn = float(self.v_warn.get())
         self.armed.clear()
@@ -1616,6 +1719,10 @@ class Hud:
                 with self.lock:
                     self.snap, self.error = snap, ""
                     self.state["learned"] = self.engine.learned
+                sig = json.dumps(self.engine.learned, sort_keys=True)
+                if sig != getattr(self, "saved_sig", None):
+                    self.saved_sig = sig
+                    save_state(self.state)
             except Exception as exc:
                 log_error("collect: " + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
                 with self.lock:
@@ -1639,17 +1746,43 @@ class Hud:
                 pass
         self.root.bell()
 
+    def alert(self, text):
+        self.flash_until = time.time() + 4
+        self.toast = (text, time.time() + 5)
+        if self.sound:
+            self.play_alert()
+
     def check_alert(self, row):
-        if not row or not row["tokens"] or row["estimated"]:
+        """Threshold alert + compaction detection, for every visible conversation."""
+        if not row or not row["tokens"]:
             return
-        key, lp = row["id"], row["limit_pct"]
-        if lp >= self.warn and self.armed.get(key, True):
+        key, lp, tok = row["id"], row["limit_pct"], row["tokens"]
+        prev = self.last_tok.get(key)
+        self.last_tok[key] = tok
+        nd, pd = row.get("n_div", 0), self.last_div.get(key)
+        self.last_div[key] = nd
+        if pd is not None and nd > pd:        # a compaction divider appeared: it really happened
+            self.alert(tr("t_compacted", t=row["title"]))
+            self.armed[key] = True
+            self.armed[key + "!"] = True
+            return
+        if time.time() - max(row.get("activity", 0), row.get("fetched", 0)) > 1800 and "activity" in row:
+            return                  # not a conversation you are working in: no alert
+        if prev and prev > 50_000 and tok < prev * 0.6:
+            self.alert(tr("t_compacted", t=row["title"]))
+            self.armed[key] = True
+            return
+        crit = max(self.warn + 5, 95.0)
+        if lp >= crit and self.armed.get(key + "!", True):
+            self.armed[key + "!"] = False
             self.armed[key] = False
-            self.flash_until = time.time() + 4
-            if self.sound:
-                self.play_alert()
+            self.alert(tr("t_crit", t=row["title"], p=f"{lp:.0f}"))
+        elif lp >= self.warn and self.armed.get(key, True):
+            self.armed[key] = False
+            self.alert(tr("t_warn", t=row["title"], p=f"{lp:.0f}"))
         elif lp < self.warn - 10:
             self.armed[key] = True
+            self.armed[key + "!"] = True
 
     # -- drawing ----------------------------------------------------------
     def fit(self, font, text, width):
@@ -1697,7 +1830,8 @@ class Hud:
             return
         rows = self.visible(snap)
         row, pinned = self.current(rows)
-        self.check_alert(row)
+        for r in sorted(self.visible(snap), key=lambda r: r is row):    # the current one last: its message stays
+            self.check_alert(r)
         if row is None:
             if snap["all"]:               # there are conversations, all hidden
                 head, hint = tr("h_all_hidden"), tr("h_all_hidden2")
@@ -1726,7 +1860,7 @@ class Hud:
                 rest = row["compact_at"] - row["tokens"]
                 left += "  ·  " + tr("h_compact", v=fk(row["compact_at"])) + (
                     tr("h_left", v=fk(rest)) if rest > 0 else tr("h_reached"))
-            pct_txt = ("≈" if row["estimated"] else "~" if row["stale"] else "") + f"{row['pct']:.0f} %"
+            pct_txt = ("≈" if row["estimated"] else "~" if row["stale"] else "") + f"{row['limit_pct']:.0f} %"
         else:
             left = tr("h_notcached") if not row["cached"] else tr("h_noturn")
             pct_txt = "-"
@@ -1766,7 +1900,7 @@ class Hud:
                               fill=GREEN if r["running"] else TRACK, outline="")
                 bx0, bx1 = pad + S(12), pad + S(56)
                 self.bar(bx0, cy - S(3), bx1, cy + S(3), r, rc)
-                pct = ("≈" if r["estimated"] else "~" if r["stale"] else "") + f"{r['pct']:.0f} %" if r["tokens"] else "-"
+                pct = ("≈" if r["estimated"] else "~" if r["stale"] else "") + f"{r['limit_pct']:.0f} %" if r["tokens"] else "-"
                 c.create_text(bx1 + S(38), cy, anchor="e", fill=rc if r["tokens"] else DIM,
                               font=self.f_small, text=pct)
                 mt = pretty_model(r["model"])
@@ -1838,7 +1972,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--once", action="store_true", help="print the table once and exit")
     ap.add_argument("--debug", action="store_true", help="table + diagnostics of the files read")
-    ap.add_argument("--interval", type=float, default=2.0, help="seconds between two reads (default 2)")
+    ap.add_argument("--interval", type=float, default=1.0, help="seconds between two reads (default 1)")
     ap.add_argument("--days", type=float, default=14.0, help="ignore conversations older than this many days")
     ap.add_argument("--limit", type=int, default=10, help="maximum number of conversations listed")
     ap.add_argument("--warn", type=float, default=None,
